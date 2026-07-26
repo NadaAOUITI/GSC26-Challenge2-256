@@ -1,0 +1,15 @@
+# Competition dataset (clone separately; ~400 MB)
+dataset/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
