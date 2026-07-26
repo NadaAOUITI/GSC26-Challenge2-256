@@ -29,7 +29,10 @@ GSC2/
   src/
     data_loader.py
     detector.py
+    evaluate.py
     main.py
+  tests/
+  docs/adr/
   requirements.txt
 ```
 
@@ -41,10 +44,20 @@ python -m venv .venv
 pip install -r requirements.txt
 
 # Scan first 10 training samples
-python -m src.main
+python -m src.main scan
 
 # Inspect one known vulnerable sample
-python -m src.main --sample-id 63dd948580aa29a6fd4868f5
+python -m src.main scan --sample-id 63dd948580aa29a6fd4868f5
+
+# Evaluate all 150 training samples (metrics summary)
+python -m src.main eval --full
+```
+
+## Testing
+
+```bash
+pytest                          # unit + integration (integration skips without dataset)
+python -m src.main eval --full  # print TP/FP/FN/recall on full train set
 ```
 
 ## Current approach

@@ -16,3 +16,4 @@ Each ADR includes:
 | ADR | Title | Status |
 |-----|-------|--------|
 | [0001](0001-project-architecture.md) | Project architecture and delivery strategy | Accepted |
+| [0002](0002-evaluation-metrics.md) | Evaluation metrics and test harness | Accepted |
