@@ -8,6 +8,18 @@ GitHub Actions workflows can be vulnerable when **untrusted inputs** (branch nam
 
 This project loads competition samples, scans workflow YAML for risky patterns, generates env-wrap patches, and produces Kaggle submission CSV rows.
 
+## Architecture
+
+![Challenge 02 pipeline architecture](docs/architecture.png)
+
+*Excalidraw-style diagram — editable source: [`docs/architecture.excalidraw`](docs/architecture.excalidraw)*
+
+```text
+External Data → data_loader → resolver → detector+taint → patcher → predict → Kaggle CSV
+                              ↑              ↑ optional OpenRouter (--use-llm)
+                         CLI (main.py)   evaluate (train metrics)
+```
+
 ## Phase I progress check-in (2026-07-26)
 
 | Item | Status |
@@ -43,7 +55,7 @@ This project loads competition samples, scans workflow YAML for risky patterns, 
 GSC2/
   data/           # CSV metadata from Kaggle
   dataset/        # Cloned competition repo (gitignored)
-  src/            # ~1,160 LOC — detector, taint, patcher, predict, eval
+  src/            # detector, taint, patcher, predict, llm, eval
   tests/
   docs/adr/
   output/         # Generated patches and submission CSV (gitignored)
@@ -87,6 +99,23 @@ python -m src.main predict --split train --output output/submission_train.csv
 python -m src.main predict --split validation --output output/submission.csv
 ```
 
+## OpenRouter LLM assist (optional)
+
+Set your in-pipeline API key (not for IDE use):
+
+```bash
+# PowerShell
+$env:OPENROUTER_API_KEY = "sk-or-..."
+$env:OPENROUTER_MODEL = "google/gemma-2-9b-it:free"   # optional
+
+# Augment scan/eval/patch/predict with LLM findings
+python -m src.main scan --sample-id 63dd948580aa29a6fd4868f5 --use-llm
+python -m src.main llm --sample-id 63dd948580aa29a6fd4868f5
+python -m src.main predict --split train --use-llm --output output/submission_llm.csv
+```
+
+Rules remain the primary detector; `--use-llm` merges additional JSON findings from OpenRouter.
+
 ## Current approach
 
 **Rule-based detector** with taint tracking and env-wrap patching:
@@ -97,8 +126,9 @@ python -m src.main predict --split validation --output output/submission.csv
 - Walk steps in order; follow `uses:` into composite actions and reusable workflows
 - Generate patches via env-wrap + quoted shell variables; emit unified diffs
 - Train baseline: **TP=22, FP=0, FN=7** (recall ~76%)
+- Optional OpenRouter pass via `--use-llm` for additional findings (see [ADR 0005](docs/adr/0005-openrouter-integration.md))
 
-**Next steps:** validation split predict, improve recall on remaining FN samples, optional OpenRouter LLM assist.
+**Next steps:** validation split predict, improve recall, tune LLM prompts on FN samples.
 
 ## Submission access
 

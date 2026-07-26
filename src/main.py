@@ -4,16 +4,29 @@ import sys
 from pathlib import Path
 
 from src.data_loader import load_train_samples
-from src.detector import scan_workflow
 from src.evaluate import load_untrusted_context_list, run_evaluation, write_report_json
+from src.llm import MissingApiKeyError, OpenRouterClient, dedupe_findings, request_additional_findings
 from src.paths import OUTPUT_DIR
 from src.predict import predict_split
 from src.patcher import generate_patch_for_sample
+from src.scan_pipeline import collect_findings
 
 
-def _print_scan_results(report, sample_id: str | None) -> None:
+def _add_llm_flag(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--use-llm",
+        action="store_true",
+        help="Augment rule-based findings with OpenRouter (requires OPENROUTER_API_KEY).",
+    )
+
+
+def _print_scan_results(report, sample_id: str | None, use_llm: bool) -> None:
     print(f"Loaded {report.sample_count} sample(s)")
-    print(f"Using {report.untrusted_context_count} untrusted context(s)\n")
+    print(f"Using {report.untrusted_context_count} untrusted context(s)")
+    if use_llm:
+        print("LLM augmentation: enabled\n")
+    else:
+        print()
 
     for result in report.results:
         status = "VULN" if result.predicted_vulnerable else "CLEAN"
@@ -26,7 +39,11 @@ def _print_scan_results(report, sample_id: str | None) -> None:
 
         if sample_id and result.findings_count > 0:
             sample = next(s for s in load_train_samples() if s.sample_id == sample_id)
-            findings = scan_workflow(sample.workflow_path, load_untrusted_context_list())
+            findings = collect_findings(
+                sample.workflow_path,
+                load_untrusted_context_list(),
+                use_llm=use_llm,
+            )
             print(json.dumps([finding.__dict__ for finding in findings], indent=2))
 
     metrics = report.metrics
@@ -54,16 +71,28 @@ def _print_eval_summary(report) -> None:
 
 def cmd_scan(args: argparse.Namespace) -> None:
     try:
-        report = run_evaluation(sample_id=args.sample_id, limit=None if args.full else args.limit)
+        report = run_evaluation(
+            sample_id=args.sample_id,
+            limit=None if args.full else args.limit,
+            use_llm=args.use_llm,
+        )
+    except MissingApiKeyError as error:
+        raise SystemExit(str(error)) from error
     except ValueError as error:
         raise SystemExit(str(error)) from error
-    _print_scan_results(report, args.sample_id)
+    _print_scan_results(report, args.sample_id, args.use_llm)
 
 
 def cmd_eval(args: argparse.Namespace) -> None:
     try:
         limit = None if args.full else args.limit
-        report = run_evaluation(sample_id=args.sample_id, limit=limit)
+        report = run_evaluation(
+            sample_id=args.sample_id,
+            limit=limit,
+            use_llm=args.use_llm,
+        )
+    except MissingApiKeyError as error:
+        raise SystemExit(str(error)) from error
     except ValueError as error:
         raise SystemExit(str(error)) from error
 
@@ -83,7 +112,11 @@ def cmd_patch(args: argparse.Namespace) -> None:
         raise SystemExit(f"Unknown sample_id: {args.sample_id}")
 
     untrusted = load_untrusted_context_list()
-    findings = scan_workflow(sample.workflow_path, untrusted)
+    try:
+        findings = collect_findings(sample.workflow_path, untrusted, use_llm=args.use_llm)
+    except MissingApiKeyError as error:
+        raise SystemExit(str(error)) from error
+
     patch_text = generate_patch_for_sample(args.sample_id, findings, untrusted)
     if not patch_text:
         print("No patch generated (no findings or no applicable fixes).")
@@ -101,8 +134,44 @@ def cmd_patch(args: argparse.Namespace) -> None:
 def cmd_predict(args: argparse.Namespace) -> None:
     output_path = Path(args.output)
     patch_dir = Path(args.patch_dir) if args.patch_dir else OUTPUT_DIR / "patches"
-    rows = predict_split(args.split, output_path, patch_dir)
+    try:
+        rows = predict_split(
+            args.split,
+            output_path,
+            patch_dir,
+            use_llm=args.use_llm,
+        )
+    except MissingApiKeyError as error:
+        raise SystemExit(str(error)) from error
     print(f"Wrote {len(rows)} rows to {output_path}")
+
+
+def cmd_llm(args: argparse.Namespace) -> None:
+    samples = load_train_samples()
+    sample = next((item for item in samples if item.sample_id == args.sample_id), None)
+    if sample is None:
+        raise SystemExit(f"Unknown sample_id: {args.sample_id}")
+
+    untrusted = load_untrusted_context_list()
+    rule_findings = collect_findings(sample.workflow_path, untrusted, use_llm=False)
+    content = sample.workflow_path.read_text(encoding="utf-8", errors="replace")
+
+    try:
+        client = OpenRouterClient.from_env()
+        llm_findings = request_additional_findings(
+            sample.workflow_path,
+            content,
+            untrusted,
+            rule_findings,
+            client=client,
+        )
+    except MissingApiKeyError as error:
+        raise SystemExit(str(error)) from error
+
+    print(f"Rule findings: {len(rule_findings)}")
+    print(f"LLM additional findings: {len(llm_findings)}")
+    merged = dedupe_findings(rule_findings + llm_findings)
+    print(json.dumps([finding.__dict__ for finding in merged], indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -119,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Scan all training samples (overrides --limit).",
     )
+    _add_llm_flag(scan_parser)
     scan_parser.set_defaults(func=cmd_scan)
 
     eval_parser = subparsers.add_parser("eval", help="Run evaluation and print summary metrics.")
@@ -130,11 +200,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Evaluate all training samples (overrides --limit).",
     )
     eval_parser.add_argument("--json", help="Write evaluation report JSON to this path.")
+    _add_llm_flag(eval_parser)
     eval_parser.set_defaults(func=cmd_eval)
 
     patch_parser = subparsers.add_parser("patch", help="Generate env-wrap patch for a sample.")
     patch_parser.add_argument("--sample-id", required=True, help="Sample ID to patch.")
     patch_parser.add_argument("--write", help="Directory to write .patch file.")
+    _add_llm_flag(patch_parser)
     patch_parser.set_defaults(func=cmd_patch)
 
     predict_parser = subparsers.add_parser("predict", help="Generate submission CSV for a split.")
@@ -153,7 +225,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--patch-dir",
         help="Directory for sidecar .patch files (default: output/patches).",
     )
+    _add_llm_flag(predict_parser)
     predict_parser.set_defaults(func=cmd_predict)
+
+    llm_parser = subparsers.add_parser(
+        "llm",
+        help="Run OpenRouter augmentation for one sample and print merged findings.",
+    )
+    llm_parser.add_argument("--sample-id", required=True, help="Sample ID to analyze.")
+    llm_parser.set_defaults(func=cmd_llm)
 
     return parser
 

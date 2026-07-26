@@ -3,10 +3,11 @@ import json
 from pathlib import Path
 
 from src.data_loader import Sample, load_train_samples
-from src.detector import Finding, scan_workflow
+from src.detector import Finding
 from src.evaluate import load_untrusted_context_list
 from src.paths import OUTPUT_DIR, VALIDATION_WORKFLOWS
 from src.patcher import generate_patch_for_sample
+from src.scan_pipeline import collect_findings
 
 
 def findings_to_vulnerabilities(findings: list[Finding]) -> list[dict]:
@@ -45,8 +46,18 @@ def findings_to_patches(
     ]
 
 
-def scan_sample(sample: Sample, untrusted_contexts: list[str]) -> list[Finding]:
-    return scan_workflow(sample.workflow_path, untrusted_contexts)
+def scan_sample(
+    sample: Sample,
+    untrusted_contexts: list[str],
+    use_llm: bool = False,
+    llm_client=None,
+) -> list[Finding]:
+    return collect_findings(
+        sample.workflow_path,
+        untrusted_contexts,
+        use_llm=use_llm,
+        llm_client=llm_client,
+    )
 
 
 def predict_sample(
@@ -54,8 +65,10 @@ def predict_sample(
     untrusted_contexts: list[str],
     write_patch_dir: Path | None = None,
     patch_prefix: str = "output/patches",
+    use_llm: bool = False,
+    llm_client=None,
 ) -> dict:
-    findings = scan_sample(sample, untrusted_contexts)
+    findings = scan_sample(sample, untrusted_contexts, use_llm=use_llm, llm_client=llm_client)
     patch_text = generate_patch_for_sample(sample.sample_id, findings, untrusted_contexts)
 
     if write_patch_dir and patch_text:
@@ -104,10 +117,15 @@ def predict_split(
     split: str,
     output_path: Path,
     patch_dir: Path | None = None,
+    use_llm: bool = False,
+    llm_client=None,
 ) -> list[dict]:
     untrusted = load_untrusted_context_list()
     samples = load_samples_for_split(split)
     patch_dir = patch_dir or OUTPUT_DIR / "patches"
-    rows = [predict_sample(sample, untrusted, patch_dir) for sample in samples]
+    rows = [
+        predict_sample(sample, untrusted, patch_dir, use_llm=use_llm, llm_client=llm_client)
+        for sample in samples
+    ]
     write_submission_csv(rows, output_path)
     return rows

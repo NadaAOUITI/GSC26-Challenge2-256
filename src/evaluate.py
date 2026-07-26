@@ -3,8 +3,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from src.data_loader import Sample, load_train_samples, load_untrusted_contexts
-from src.detector import DEFAULT_UNTRUSTED_CONTEXTS, scan_workflow
+from src.detector import DEFAULT_UNTRUSTED_CONTEXTS
 from src.paths import UNTRUSTED_CSV
+from src.scan_pipeline import collect_findings
 
 
 @dataclass
@@ -58,10 +59,17 @@ def compute_metrics(results: list[SampleResult]) -> EvalMetrics:
 def evaluate_samples(
     samples: list[Sample],
     untrusted_contexts: list[str],
+    use_llm: bool = False,
+    llm_client=None,
 ) -> tuple[list[SampleResult], EvalMetrics]:
     results: list[SampleResult] = []
     for sample in samples:
-        findings = scan_workflow(sample.workflow_path, untrusted_contexts)
+        findings = collect_findings(
+            sample.workflow_path,
+            untrusted_contexts,
+            use_llm=use_llm,
+            llm_client=llm_client,
+        )
         results.append(
             SampleResult(
                 sample_id=sample.sample_id,
@@ -96,6 +104,8 @@ class EvaluationReport:
 def run_evaluation(
     sample_id: str | None = None,
     limit: int | None = None,
+    use_llm: bool = False,
+    llm_client=None,
 ) -> EvaluationReport:
     samples = load_train_samples()
     if sample_id:
@@ -106,7 +116,12 @@ def run_evaluation(
         samples = samples[:limit]
 
     untrusted = load_untrusted_context_list()
-    results, metrics = evaluate_samples(samples, untrusted)
+    results, metrics = evaluate_samples(
+        samples,
+        untrusted,
+        use_llm=use_llm,
+        llm_client=llm_client,
+    )
     return EvaluationReport(
         sample_count=len(samples),
         untrusted_context_count=len(untrusted),
