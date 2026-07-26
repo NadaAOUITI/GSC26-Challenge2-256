@@ -101,18 +101,28 @@ python -m src.main predict --split validation --output output/submission.csv
 
 ## OpenRouter LLM assist (optional)
 
-Set your in-pipeline API key (not for IDE use):
+1. Copy the template and add your key (`.env` is gitignored):
 
-```bash
-# PowerShell
-$env:OPENROUTER_API_KEY = "sk-or-..."
-$env:OPENROUTER_MODEL = "google/gemma-2-9b-it:free"   # optional
+   ```bash
+   copy .env.example .env
+   ```
 
-# Augment scan/eval/patch/predict with LLM findings
-python -m src.main scan --sample-id 63dd948580aa29a6fd4868f5 --use-llm
-python -m src.main llm --sample-id 63dd948580aa29a6fd4868f5
-python -m src.main predict --split train --use-llm --output output/submission_llm.csv
-```
+2. Edit `.env`:
+
+   ```env
+   OPENROUTER_API_KEY=sk-or-v1-...
+   OPENROUTER_MODEL=google/gemma-2-9b-it:free
+   ```
+
+   The CLI loads `.env` automatically — no need to set variables in PowerShell each time.
+
+3. Run with `--use-llm`:
+
+   ```bash
+   python -m src.main scan --sample-id 63dd948580aa29a6fd4868f5 --use-llm
+   python -m src.main llm --sample-id 63dd948580aa29a6fd4868f5
+   python -m src.main predict --split train --use-llm --output output/submission_llm.csv
+   ```
 
 Rules remain the primary detector; `--use-llm` merges additional JSON findings from OpenRouter.
 

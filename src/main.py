@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from src.data_loader import load_train_samples
+from src.env_loader import load_project_env
 from src.evaluate import load_untrusted_context_list, run_evaluation, write_report_json
 from src.llm import MissingApiKeyError, OpenRouterClient, dedupe_findings, request_additional_findings
 from src.paths import OUTPUT_DIR
@@ -239,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
+    load_project_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     args.func(args)
