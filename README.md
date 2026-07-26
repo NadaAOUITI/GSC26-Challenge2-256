@@ -62,14 +62,15 @@ python -m src.main eval --full  # print TP/FP/FN/recall on full train set
 
 ## Current approach
 
-**Baseline rule-based detector** (work in progress):
+**Baseline rule-based detector** with taint tracking:
 
 - Load samples from `train.csv`
 - Read matching workflow YAML from `dataset/train/workflows/{sample_id}.yml`
-- Flag `${{ ... }}` expressions inside `run:` blocks when they match untrusted contexts
-- Follow `uses:` references into local composite actions and reusable workflows
+- Flag direct untrusted `${{ ... }}` and propagated taint (`env.*`, `inputs.*`, `steps.*.outputs.*`) inside `run:` blocks
+- Walk steps in order; follow `uses:` into composite actions and reusable workflows
+- Train baseline after Feature 2: **TP=22, FP=0, FN=7** (recall ~76%)
 
-Next steps: improve line-level accuracy, generate unified diff patches, optional OpenRouter LLM assist.
+Next steps: patch generation, optional OpenRouter LLM assist, Kaggle submission pipeline.
 
 ## Submission access
 

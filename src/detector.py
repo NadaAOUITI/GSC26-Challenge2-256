@@ -6,6 +6,19 @@ import yaml
 
 from src.paths import TRAIN_ACTIONS
 from src.resolver import resolve_action_path, resolve_reusable_workflow_path
+from src.taint import (
+    TaintState,
+    apply_env_bindings,
+    apply_input_defaults,
+    apply_with_bindings_to_inputs,
+    expr_is_tainted_or_untrusted,
+    is_tainted_expr,
+    is_untrusted_source,
+    normalize_expr,
+    propagate_github_env_writes,
+    taint_all_step_outputs,
+    with_map_has_taint,
+)
 
 DEFAULT_UNTRUSTED_CONTEXTS = [
     "github.head_ref",
@@ -20,7 +33,6 @@ DEFAULT_UNTRUSTED_CONTEXTS = [
 ]
 
 EXPRESSION_PATTERN = re.compile(r"\$\{\{\s*([^}]+?)\s*\}\}")
-USES_LINE_PATTERN = re.compile(r"^\s*uses:\s*(.+?)\s*$")
 
 
 @dataclass
@@ -32,54 +44,299 @@ class Finding:
     explanation: str
 
 
-def _normalize_context(expression: str) -> str:
-    return ".".join(part.strip() for part in expression.split(".") if part.strip())
+def _line_for_expression(content: str, expression: str, fallback: int = 1) -> int:
+    needle = f"${{{{ {expression} }}}}"
+    compact = f"${{{{ {expression.strip()} }}}}"
+    for candidate in (needle, compact, expression):
+        index = content.find(candidate)
+        if index >= 0:
+            return content.count("\n", 0, index) + 1
+    return fallback
 
 
-def _is_untrusted(expression: str, untrusted_contexts: list[str]) -> bool:
-    normalized = _normalize_context(expression)
-    for context in untrusted_contexts:
-        if normalized == context or normalized.startswith(f"{context}."):
-            return True
-    return False
+def _finding(
+    file_path: Path,
+    content: str,
+    expression: str,
+    propagated: bool,
+    fallback_line: int = 1,
+) -> Finding:
+    context = normalize_expr(expression)
+    if propagated:
+        explanation = (
+            f"Tainted `{context}` appears inside a `run:` shell block "
+            f"(multi-step code injection)."
+        )
+    else:
+        explanation = (
+            f"Untrusted `{context}` appears inside a `run:` shell block "
+            f"(possible code injection)."
+        )
+    return Finding(
+        file=str(file_path.as_posix()),
+        line=_line_for_expression(content, expression, fallback_line),
+        expression=expression,
+        context=context,
+        explanation=explanation,
+    )
 
 
-def _line_number_for_offset(content: str, offset: int) -> int:
-    return content.count("\n", 0, offset) + 1
-
-
-def _scan_run_block(
+def _scan_run_text(
     file_path: Path,
     content: str,
     run_text: str,
-    run_start: int,
+    state: TaintState,
     untrusted_contexts: list[str],
+    fallback_line: int = 1,
 ) -> list[Finding]:
     findings: list[Finding] = []
-    base_line = _line_number_for_offset(content, run_start)
-    lines = run_text.splitlines() or [run_text]
-    for index, line in enumerate(lines, start=0):
-        for match in EXPRESSION_PATTERN.finditer(line):
-            expression = match.group(1)
-            if _is_untrusted(expression, untrusted_contexts):
-                findings.append(
-                    Finding(
-                        file=str(file_path.as_posix()),
-                        line=base_line + index,
-                        expression=expression,
-                        context=_normalize_context(expression),
-                        explanation=(
-                            f"Untrusted `{_normalize_context(expression)}` appears "
-                            f"inside a `run:` shell block (possible code injection)."
-                        ),
+    if not isinstance(run_text, str):
+        return findings
+    for match in EXPRESSION_PATTERN.finditer(run_text):
+        expression = match.group(1)
+        if is_untrusted_source(expression, untrusted_contexts):
+            findings.append(_finding(file_path, content, expression, False, fallback_line))
+        elif is_tainted_expr(expression, state):
+            findings.append(_finding(file_path, content, expression, True, fallback_line))
+    return findings
+
+
+def _scan_steps(
+    steps: list | None,
+    file_path: Path,
+    content: str,
+    state: TaintState,
+    untrusted_contexts: list[str],
+    visited: set[Path],
+    actions_root: Path,
+    reusable_root: Path,
+    job_env: dict | None = None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if not isinstance(steps, list):
+        return findings
+
+    if isinstance(job_env, dict):
+        apply_env_bindings(state, job_env, untrusted_contexts)
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+
+        apply_env_bindings(state, step.get("env"), untrusted_contexts)
+
+        if "run" in step:
+            run_text = step["run"]
+            findings.extend(
+                _scan_run_text(file_path, content, run_text, state, untrusted_contexts)
+            )
+            propagate_github_env_writes(run_text, state, untrusted_contexts)
+
+        step_id = step.get("id")
+        uses_value = step.get("uses")
+        with_map = step.get("with")
+
+        if isinstance(uses_value, str):
+            if step_id and with_map_has_taint(with_map, state, untrusted_contexts):
+                taint_all_step_outputs(state, str(step_id))
+
+            action_path = resolve_action_path(uses_value, actions_root)
+            if action_path:
+                input_state = TaintState()
+                findings.extend(
+                    _scan_composite_action(
+                        action_path,
+                        input_state,
+                        untrusted_contexts,
+                        visited,
+                        actions_root,
+                        reusable_root,
+                    )
+                )
+                continue
+
+            workflow_path = resolve_reusable_workflow_path(uses_value, reusable_root)
+            if workflow_path:
+                child_state = TaintState()
+                apply_env_bindings(child_state, with_map, untrusted_contexts)
+                input_state = apply_with_bindings_to_inputs(with_map, state, untrusted_contexts)
+                for input_name in input_state.tainted_inputs:
+                    child_state.tainted_inputs.add(input_name)
+                findings.extend(
+                    _scan_document(
+                        workflow_path,
+                        child_state,
+                        untrusted_contexts,
+                        visited,
+                        actions_root,
+                        reusable_root,
                     )
                 )
     return findings
 
 
-def _extract_run_blocks(content: str) -> list[tuple[int, str]]:
-    blocks: list[tuple[int, str]] = []
-    run_pattern = re.compile(r"(?m)^(\s*)run:\s*(?:\|\s*)?\n", re.MULTILINE)
+def _scan_composite_action(
+    action_path: Path,
+    input_state: TaintState,
+    untrusted_contexts: list[str],
+    visited: set[Path],
+    actions_root: Path,
+    reusable_root: Path,
+) -> list[Finding]:
+    resolved = action_path.resolve()
+    if resolved in visited:
+        return []
+    visited.add(resolved)
+
+    content = action_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return []
+
+    if not isinstance(document, dict):
+        return []
+
+    state = input_state.copy()
+    apply_input_defaults(state, document.get("inputs"), untrusted_contexts)
+
+    runs = document.get("runs")
+    if not isinstance(runs, dict):
+        return []
+
+    composite_steps = runs.get("steps")
+    return _scan_steps(
+        composite_steps,
+        action_path,
+        content,
+        state,
+        untrusted_contexts,
+        visited,
+        actions_root,
+        reusable_root,
+    )
+
+
+def _scan_jobs(
+    jobs: dict | None,
+    file_path: Path,
+    content: str,
+    untrusted_contexts: list[str],
+    visited: set[Path],
+    actions_root: Path,
+    reusable_root: Path,
+    inherited_state: TaintState | None = None,
+) -> list[Finding]:
+    findings: list[Finding] = []
+    if not isinstance(jobs, dict):
+        return findings
+
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+
+        if isinstance(job.get("uses"), str):
+            uses_value = job["uses"]
+            with_map = job.get("with")
+            workflow_path = resolve_reusable_workflow_path(uses_value, reusable_root)
+            if workflow_path:
+                child_state = inherited_state.copy() if inherited_state else TaintState()
+                apply_env_bindings(child_state, with_map, untrusted_contexts)
+                input_state = apply_with_bindings_to_inputs(
+                    with_map, child_state, untrusted_contexts
+                )
+                for input_name in input_state.tainted_inputs:
+                    child_state.tainted_inputs.add(input_name)
+                findings.extend(
+                    _scan_document(
+                        workflow_path,
+                        child_state,
+                        untrusted_contexts,
+                        visited,
+                        actions_root,
+                        reusable_root,
+                    )
+                )
+            continue
+
+        state = inherited_state.copy() if inherited_state else TaintState()
+        findings.extend(
+            _scan_steps(
+                job.get("steps"),
+                file_path,
+                content,
+                state,
+                untrusted_contexts,
+                visited,
+                actions_root,
+                reusable_root,
+                job_env=job.get("env"),
+            )
+        )
+    return findings
+
+
+def _scan_document(
+    file_path: Path,
+    inherited_state: TaintState | None,
+    untrusted_contexts: list[str],
+    visited: set[Path],
+    actions_root: Path,
+    reusable_root: Path,
+) -> list[Finding]:
+    resolved = file_path.resolve()
+    if resolved in visited:
+        return []
+    visited.add(resolved)
+
+    content = file_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return _scan_run_text_fallback(file_path, content, untrusted_contexts)
+
+    if not isinstance(document, dict):
+        return []
+
+    if "runs" in document and isinstance(document.get("runs"), dict):
+        state = inherited_state.copy() if inherited_state else TaintState()
+        apply_input_defaults(state, document.get("inputs"), untrusted_contexts)
+        return _scan_steps(
+            document["runs"].get("steps"),
+            file_path,
+            content,
+            state,
+            untrusted_contexts,
+            visited,
+            actions_root,
+            reusable_root,
+        )
+
+    state = inherited_state.copy() if inherited_state else TaintState()
+    file_env = document.get("env")
+    if isinstance(file_env, dict):
+        apply_env_bindings(state, file_env, untrusted_contexts)
+
+    return _scan_jobs(
+        document.get("jobs"),
+        file_path,
+        content,
+        untrusted_contexts,
+        visited,
+        actions_root,
+        reusable_root,
+        inherited_state=state,
+    )
+
+
+def _scan_run_text_fallback(
+    file_path: Path,
+    content: str,
+    untrusted_contexts: list[str],
+) -> list[Finding]:
+    state = TaintState()
+    findings: list[Finding] = []
+    run_pattern = re.compile(r"(?m)^(\s*)(?:-\s+)?run:\s*(?:\|\s*)?\n", re.MULTILINE)
     for match in run_pattern.finditer(content):
         indent = len(match.group(1))
         start = match.end()
@@ -91,66 +348,15 @@ def _extract_run_blocks(content: str) -> list[tuple[int, str]]:
                 line_end = len(content)
             line = content[pos:line_end]
             if line.strip() == "":
-                lines.append(line)
                 pos = line_end + 1
                 continue
-            if line.startswith(" " * (indent + 2)) or line.strip() == "":
+            if line.startswith(" " * (indent + 2)):
                 lines.append(line[indent + 2 :] if len(line) > indent + 2 else "")
                 pos = line_end + 1
                 continue
             break
-        blocks.append((start, "\n".join(lines)))
-    return blocks
-
-
-def _extract_uses_values(content: str) -> list[str]:
-    values: list[str] = []
-    for line in content.splitlines():
-        match = USES_LINE_PATTERN.match(line)
-        if match:
-            values.append(match.group(1).strip().strip("'").strip('"'))
-    return values
-
-
-def _scan_file_content(
-    file_path: Path,
-    content: str,
-    untrusted_contexts: list[str],
-    visited: set[Path],
-    actions_root: Path,
-    reusable_root: Path,
-) -> list[Finding]:
-    findings: list[Finding] = []
-    for run_start, run_text in _extract_run_blocks(content):
-        findings.extend(
-            _scan_run_block(file_path, content, run_text, run_start, untrusted_contexts)
-        )
-
-    for uses_value in _extract_uses_values(content):
-        action_path = resolve_action_path(uses_value, actions_root)
-        if action_path:
-            findings.extend(
-                scan_file(
-                    action_path,
-                    untrusted_contexts,
-                    visited,
-                    actions_root,
-                    reusable_root,
-                )
-            )
-            continue
-
-        workflow_path = resolve_reusable_workflow_path(uses_value, reusable_root)
-        if workflow_path:
-            findings.extend(
-                scan_file(
-                    workflow_path,
-                    untrusted_contexts,
-                    visited,
-                    actions_root,
-                    reusable_root,
-                )
-            )
+        run_text = "\n".join(lines)
+        findings.extend(_scan_run_text(file_path, content, run_text, state, untrusted_contexts))
     return findings
 
 
@@ -160,24 +366,20 @@ def scan_file(
     visited: set[Path] | None = None,
     actions_root: Path | None = None,
     reusable_root: Path | None = None,
+    inherited_state: TaintState | None = None,
 ) -> list[Finding]:
     if not file_path.exists():
         return []
 
-    resolved = file_path.resolve()
     if visited is None:
         visited = set()
-    if resolved in visited:
-        return []
-    visited.add(resolved)
 
     actions_root = actions_root or TRAIN_ACTIONS
     reusable_root = reusable_root or actions_root.parent / "reusable_workflows"
 
-    content = file_path.read_text(encoding="utf-8", errors="replace")
-    return _scan_file_content(
+    return _scan_document(
         file_path,
-        content,
+        inherited_state,
         untrusted_contexts,
         visited,
         actions_root,
@@ -186,4 +388,17 @@ def scan_file(
 
 
 def scan_workflow(workflow_path: Path, untrusted_contexts: list[str]) -> list[Finding]:
-    return scan_file(workflow_path, untrusted_contexts)
+    findings = scan_file(workflow_path, untrusted_contexts)
+    return _dedupe_findings(findings)
+
+
+def _dedupe_findings(findings: list[Finding]) -> list[Finding]:
+    seen: set[tuple[str, int, str]] = set()
+    unique: list[Finding] = []
+    for finding in findings:
+        key = (finding.file, finding.line, finding.expression)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(finding)
+    return unique

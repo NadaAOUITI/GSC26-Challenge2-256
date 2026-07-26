@@ -32,11 +32,17 @@ def resolve_action_path(
     owner, repo, subpath = parsed
     sha = USES_PATTERN.match(uses_value.strip()).group(2)
     base = actions_root / owner / repo / _sha_prefix(sha)
+    candidates: list[Path] = []
     if subpath:
-        candidate = base / subpath / "action.yml"
+        candidates.append(base / subpath / "action.yml")
+        candidates.append(base / subpath / "action.yaml")
     else:
-        candidate = base / "action.yml"
-    return candidate if candidate.exists() else None
+        candidates.append(base / "action.yml")
+        candidates.append(base / "action.yaml")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def resolve_reusable_workflow_path(
