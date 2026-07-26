@@ -30,6 +30,8 @@ GSC2/
     data_loader.py
     detector.py
     evaluate.py
+    patcher.py
+    predict.py
     main.py
   tests/
   docs/adr/
@@ -58,6 +60,19 @@ python -m src.main eval --full
 ```bash
 pytest                          # unit + integration (integration skips without dataset)
 python -m src.main eval --full  # print TP/FP/FN/recall on full train set
+```
+
+## Patch generation and predict
+
+```bash
+# Generate patch diff for one sample
+python -m src.main patch --sample-id 63dd948580aa29a6fd4868f5
+
+# Write submission CSV for train split (150 rows)
+python -m src.main predict --split train --output output/submission_train.csv
+
+# After downloading validation workflows to dataset/validation/workflows/
+python -m src.main predict --split validation --output output/submission.csv
 ```
 
 ## Current approach

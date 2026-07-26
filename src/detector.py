@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from src.paths import TRAIN_ACTIONS
+from src.paths import DATASET_DIR, TRAIN_ACTIONS
 from src.resolver import resolve_action_path, resolve_reusable_workflow_path
 from src.taint import (
     TaintState,
@@ -42,6 +42,15 @@ class Finding:
     expression: str
     context: str
     explanation: str
+    propagated: bool = False
+    rel_path: str = ""
+
+
+def _rel_path(file_path: Path) -> str:
+    try:
+        return file_path.resolve().relative_to(DATASET_DIR.resolve()).as_posix()
+    except ValueError:
+        return file_path.as_posix()
 
 
 def _line_for_expression(content: str, expression: str, fallback: int = 1) -> int:
@@ -78,6 +87,8 @@ def _finding(
         expression=expression,
         context=context,
         explanation=explanation,
+        propagated=propagated,
+        rel_path=_rel_path(file_path),
     )
 
 
@@ -367,8 +378,9 @@ def scan_file(
     actions_root: Path | None = None,
     reusable_root: Path | None = None,
     inherited_state: TaintState | None = None,
+    content: str | None = None,
 ) -> list[Finding]:
-    if not file_path.exists():
+    if content is None and not file_path.exists():
         return []
 
     if visited is None:
@@ -377,13 +389,76 @@ def scan_file(
     actions_root = actions_root or TRAIN_ACTIONS
     reusable_root = reusable_root or actions_root.parent / "reusable_workflows"
 
-    return _scan_document(
+    if content is None:
+        return _scan_document(
+            file_path,
+            inherited_state,
+            untrusted_contexts,
+            visited,
+            actions_root,
+            reusable_root,
+        )
+    return _scan_document_content(
         file_path,
+        content,
         inherited_state,
         untrusted_contexts,
         visited,
         actions_root,
         reusable_root,
+    )
+
+
+def _scan_document_content(
+    file_path: Path,
+    content: str,
+    inherited_state: TaintState | None,
+    untrusted_contexts: list[str],
+    visited: set[Path],
+    actions_root: Path,
+    reusable_root: Path,
+) -> list[Finding]:
+    resolved = file_path.resolve()
+    if resolved in visited:
+        return []
+    visited.add(resolved)
+
+    try:
+        document = yaml.safe_load(content)
+    except yaml.YAMLError:
+        return _scan_run_text_fallback(file_path, content, untrusted_contexts)
+
+    if not isinstance(document, dict):
+        return []
+
+    if "runs" in document and isinstance(document.get("runs"), dict):
+        state = inherited_state.copy() if inherited_state else TaintState()
+        apply_input_defaults(state, document.get("inputs"), untrusted_contexts)
+        return _scan_steps(
+            document["runs"].get("steps"),
+            file_path,
+            content,
+            state,
+            untrusted_contexts,
+            visited,
+            actions_root,
+            reusable_root,
+        )
+
+    state = inherited_state.copy() if inherited_state else TaintState()
+    file_env = document.get("env")
+    if isinstance(file_env, dict):
+        apply_env_bindings(state, file_env, untrusted_contexts)
+
+    return _scan_jobs(
+        document.get("jobs"),
+        file_path,
+        content,
+        untrusted_contexts,
+        visited,
+        actions_root,
+        reusable_root,
+        inherited_state=state,
     )
 
 

@@ -11,6 +11,7 @@ class Sample:
     sample_id: str
     vulnerabilities: list[dict]
     patches: list[dict]
+    workflow_path_override: Path | None = None
 
     @property
     def is_vulnerable(self) -> bool:
@@ -18,6 +19,8 @@ class Sample:
 
     @property
     def workflow_path(self) -> Path:
+        if self.workflow_path_override is not None:
+            return self.workflow_path_override
         return TRAIN_WORKFLOWS / f"{self.sample_id}.yml"
 
 

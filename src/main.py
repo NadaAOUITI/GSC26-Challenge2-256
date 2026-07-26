@@ -6,6 +6,9 @@ from pathlib import Path
 from src.data_loader import load_train_samples
 from src.detector import scan_workflow
 from src.evaluate import load_untrusted_context_list, run_evaluation, write_report_json
+from src.paths import OUTPUT_DIR
+from src.predict import predict_split
+from src.patcher import generate_patch_for_sample
 
 
 def _print_scan_results(report, sample_id: str | None) -> None:
@@ -70,6 +73,38 @@ def cmd_eval(args: argparse.Namespace) -> None:
         print(f"\nWrote report to {args.json}")
 
 
+def cmd_patch(args: argparse.Namespace) -> None:
+    if not args.sample_id:
+        raise SystemExit("--sample-id is required for patch")
+
+    samples = load_train_samples()
+    sample = next((item for item in samples if item.sample_id == args.sample_id), None)
+    if sample is None:
+        raise SystemExit(f"Unknown sample_id: {args.sample_id}")
+
+    untrusted = load_untrusted_context_list()
+    findings = scan_workflow(sample.workflow_path, untrusted)
+    patch_text = generate_patch_for_sample(args.sample_id, findings, untrusted)
+    if not patch_text:
+        print("No patch generated (no findings or no applicable fixes).")
+        return
+
+    if args.write:
+        patch_dir = Path(args.write)
+        patch_dir.mkdir(parents=True, exist_ok=True)
+        patch_path = patch_dir / f"{args.sample_id}.patch"
+        patch_path.write_text(patch_text, encoding="utf-8")
+        print(f"Wrote patch to {patch_path}")
+    print(patch_text)
+
+
+def cmd_predict(args: argparse.Namespace) -> None:
+    output_path = Path(args.output)
+    patch_dir = Path(args.patch_dir) if args.patch_dir else OUTPUT_DIR / "patches"
+    rows = predict_split(args.split, output_path, patch_dir)
+    print(f"Wrote {len(rows)} rows to {output_path}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Challenge 02: GitHub Actions vulnerability detection toolkit."
@@ -96,6 +131,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     eval_parser.add_argument("--json", help="Write evaluation report JSON to this path.")
     eval_parser.set_defaults(func=cmd_eval)
+
+    patch_parser = subparsers.add_parser("patch", help="Generate env-wrap patch for a sample.")
+    patch_parser.add_argument("--sample-id", required=True, help="Sample ID to patch.")
+    patch_parser.add_argument("--write", help="Directory to write .patch file.")
+    patch_parser.set_defaults(func=cmd_patch)
+
+    predict_parser = subparsers.add_parser("predict", help="Generate submission CSV for a split.")
+    predict_parser.add_argument(
+        "--split",
+        choices=["train", "validation"],
+        default="train",
+        help="Dataset split to predict (default: train).",
+    )
+    predict_parser.add_argument(
+        "--output",
+        default=str(OUTPUT_DIR / "submission_train.csv"),
+        help="Output submission CSV path.",
+    )
+    predict_parser.add_argument(
+        "--patch-dir",
+        help="Directory for sidecar .patch files (default: output/patches).",
+    )
+    predict_parser.set_defaults(func=cmd_predict)
 
     return parser
 

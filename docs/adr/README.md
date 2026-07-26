@@ -18,3 +18,4 @@ Each ADR includes:
 | [0001](0001-project-architecture.md) | Project architecture and delivery strategy | Accepted |
 | [0002](0002-evaluation-metrics.md) | Evaluation metrics and test harness | Accepted |
 | [0003](0003-taint-tracking.md) | Taint tracking for multi-step injection flows | Accepted |
+| [0004](0004-patch-generation.md) | Patch generation and predict pipeline | Accepted |
