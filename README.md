@@ -6,7 +6,22 @@ IEEE Global Student Challenge — detect code-injection flaws in GitHub Actions 
 
 GitHub Actions workflows can be vulnerable when **untrusted inputs** (branch names, PR titles, issue text, etc.) are interpolated directly into `run:` shell commands. Attackers can inject arbitrary shell code.
 
-This project loads competition samples, scans workflow YAML for risky patterns, and will later generate patches for Kaggle submission.
+This project loads competition samples, scans workflow YAML for risky patterns, generates env-wrap patches, and produces Kaggle submission CSV rows.
+
+## Phase I progress check-in (2026-07-26)
+
+| Item | Status |
+|------|--------|
+| Rule-based detector + taint tracking | Done |
+| Patch generation (env-wrap + unified diff) | Done |
+| Predict / submission CSV pipeline | Done |
+| Unit + integration tests | 28 passing |
+| Train metrics | TP=22, FP=0, FN=7 (~76% recall) |
+| Kaggle validation workflows | Pending (Kaggle data compression) |
+
+**Pipeline:** `scan` → `eval` → `patch` → `predict`
+
+**Kaggle:** Upload `output/submission_train.csv` for Phase I checkpoint; re-run `predict --split validation` once validation workflows are available.
 
 ## Data setup
 
@@ -20,21 +35,18 @@ This project loads competition samples, scans workflow YAML for risky patterns, 
    - `train.csv` — sample IDs and ground-truth labels
    - `untrusted_data.csv` — list of untrusted GitHub context expressions
 
+3. When available, place validation workflow YAML files in `dataset/validation/workflows/`.
+
 ## Project layout
 
 ```text
 GSC2/
   data/           # CSV metadata from Kaggle
   dataset/        # Cloned competition repo (gitignored)
-  src/
-    data_loader.py
-    detector.py
-    evaluate.py
-    patcher.py
-    predict.py
-    main.py
+  src/            # ~1,160 LOC — detector, taint, patcher, predict, eval
   tests/
   docs/adr/
+  output/         # Generated patches and submission CSV (gitignored)
   requirements.txt
 ```
 
@@ -77,15 +89,16 @@ python -m src.main predict --split validation --output output/submission.csv
 
 ## Current approach
 
-**Baseline rule-based detector** with taint tracking:
+**Rule-based detector** with taint tracking and env-wrap patching:
 
 - Load samples from `train.csv`
 - Read matching workflow YAML from `dataset/train/workflows/{sample_id}.yml`
 - Flag direct untrusted `${{ ... }}` and propagated taint (`env.*`, `inputs.*`, `steps.*.outputs.*`) inside `run:` blocks
 - Walk steps in order; follow `uses:` into composite actions and reusable workflows
-- Train baseline after Feature 2: **TP=22, FP=0, FN=7** (recall ~76%)
+- Generate patches via env-wrap + quoted shell variables; emit unified diffs
+- Train baseline: **TP=22, FP=0, FN=7** (recall ~76%)
 
-Next steps: patch generation, optional OpenRouter LLM assist, Kaggle submission pipeline.
+**Next steps:** validation split predict, improve recall on remaining FN samples, optional OpenRouter LLM assist.
 
 ## Submission access
 
@@ -93,4 +106,4 @@ Grant **read access** to GitHub user `XinyuZhangXvX` on this team repository so 
 
 ## Team
 
-Global Student Challenge 2026 — Challenge 02 progress check-in.
+Global Student Challenge 2026 — Challenge 02.
