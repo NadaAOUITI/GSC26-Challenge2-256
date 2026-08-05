@@ -67,3 +67,16 @@ def test_expr_is_tainted_or_untrusted_source() -> None:
     assert expr_is_tainted_or_untrusted("github.head_ref", state, UNTRUSTED)
     state.tainted_env.add("VAR")
     assert expr_is_tainted_or_untrusted("env.VAR", state, UNTRUSTED)
+
+
+def test_compound_expression_detects_untrusted_branch() -> None:
+    from src.taint import is_untrusted_source
+
+    assert is_untrusted_source("github.head_ref || github.ref_name", UNTRUSTED)
+
+
+def test_array_index_matches_wildcard_untrusted_context() -> None:
+    from src.taint import is_untrusted_source
+
+    contexts = ["github.event.commits[*].message"]
+    assert is_untrusted_source("github.event.commits[0].message", contexts)

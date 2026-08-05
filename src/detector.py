@@ -4,7 +4,13 @@ from pathlib import Path
 
 import yaml
 
-from src.paths import DATASET_DIR, TRAIN_ACTIONS
+from src.paths import (
+    DATASET_DIR,
+    TRAIN_ACTIONS,
+    TRAIN_REUSABLE,
+    VALIDATION_ACTIONS,
+    VALIDATION_REUSABLE,
+)
 from src.resolver import resolve_action_path, resolve_reusable_workflow_path
 from src.taint import (
     TaintState,
@@ -462,8 +468,24 @@ def _scan_document_content(
     )
 
 
+def _artifact_roots_for(file_path: Path) -> tuple[Path, Path]:
+    try:
+        rel = file_path.resolve().relative_to(DATASET_DIR.resolve())
+        if rel.parts and rel.parts[0] == "validation":
+            return VALIDATION_ACTIONS, VALIDATION_REUSABLE
+    except ValueError:
+        pass
+    return TRAIN_ACTIONS, TRAIN_REUSABLE
+
+
 def scan_workflow(workflow_path: Path, untrusted_contexts: list[str]) -> list[Finding]:
-    findings = scan_file(workflow_path, untrusted_contexts)
+    actions_root, reusable_root = _artifact_roots_for(workflow_path)
+    findings = scan_file(
+        workflow_path,
+        untrusted_contexts,
+        actions_root=actions_root,
+        reusable_root=reusable_root,
+    )
     return _dedupe_findings(findings)
 
 

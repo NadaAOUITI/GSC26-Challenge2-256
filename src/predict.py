@@ -5,7 +5,7 @@ from pathlib import Path
 from src.data_loader import Sample, load_train_samples
 from src.detector import Finding
 from src.evaluate import load_untrusted_context_list
-from src.paths import OUTPUT_DIR, VALIDATION_WORKFLOWS
+from src.paths import OUTPUT_DIR, SAMPLE_SUBMISSION_CSV, VALIDATION_WORKFLOWS
 from src.patcher import generate_patch_for_sample
 from src.scan_pipeline import collect_findings
 
@@ -83,19 +83,40 @@ def predict_sample(
     }
 
 
+def load_validation_sample_ids() -> list[str]:
+    if SAMPLE_SUBMISSION_CSV.exists():
+        with SAMPLE_SUBMISSION_CSV.open(encoding="utf-8", newline="") as handle:
+            return [row["sample_id"] for row in csv.DictReader(handle)]
+    return []
+
+
 def load_samples_for_split(split: str) -> list[Sample]:
     if split == "train":
         return load_train_samples()
     if split == "validation":
         if not VALIDATION_WORKFLOWS.exists():
             raise ValueError(
-                "Validation split not found. Clone/download validation workflows to dataset/validation/workflows/"
+                "Validation workflows not found at dataset/validation/workflows/.\n"
+                "Pull the latest competition GitHub repo:\n"
+                "  cd dataset && git pull origin main\n"
+                "Also download sample_submission.csv from Kaggle into data/."
             )
+        workflow_by_id = {path.stem: path for path in VALIDATION_WORKFLOWS.glob("*.yml")}
+        template_ids = load_validation_sample_ids()
+        sample_ids = template_ids if template_ids else sorted(workflow_by_id)
+        if template_ids:
+            missing = [sample_id for sample_id in template_ids if sample_id not in workflow_by_id]
+            if missing:
+                raise ValueError(
+                    f"Missing {len(missing)} validation workflow(s), e.g. {missing[0]}. "
+                    "Run `cd dataset && git pull origin main`."
+                )
         samples: list[Sample] = []
-        for workflow_path in sorted(VALIDATION_WORKFLOWS.glob("*.yml")):
+        for sample_id in sample_ids:
+            workflow_path = workflow_by_id[sample_id]
             samples.append(
                 Sample(
-                    sample_id=workflow_path.stem,
+                    sample_id=sample_id,
                     vulnerabilities=[],
                     patches=[],
                     workflow_path_override=workflow_path,

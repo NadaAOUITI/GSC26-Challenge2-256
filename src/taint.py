@@ -28,15 +28,48 @@ def normalize_expr(expr: str) -> str:
     return ".".join(part.strip() for part in expr.strip().split(".") if part.strip())
 
 
+def normalize_array_indices(expr: str) -> str:
+    return re.sub(r"\[\d+\]", "[*]", expr.strip())
+
+
+def _matches_untrusted_context(expr: str, context: str) -> bool:
+    normalized = normalize_array_indices(normalize_expr(expr))
+    ctx_norm = normalize_array_indices(normalize_expr(context))
+    return normalized == ctx_norm or normalized.startswith(f"{ctx_norm}.")
+
+
+def _expression_parts(expr: str) -> list[str]:
+    parts = re.split(r"\|\||&&", expr)
+    return [part.strip() for part in parts if part.strip()]
+
+
 def normalize_input_name(name: str) -> str:
     return name.strip().lower().replace("-", "_")
 
 
+def _is_simple_github_ref(part: str) -> bool:
+    cleaned = part.strip().strip("()")
+    return bool(re.match(r"^github\.[\w.\[\]\*]+$", cleaned))
+
+
 def is_untrusted_source(expr: str, untrusted_contexts: list[str]) -> bool:
-    normalized = normalize_expr(expr)
     for context in untrusted_contexts:
-        if normalized == context or normalized.startswith(f"{context}."):
+        if _matches_untrusted_context(expr, context):
             return True
+
+    if re.search(r"==|!=|fromJson\(|contains\(|startsWith\(|endsWith\(", expr):
+        return False
+
+    if "||" not in expr and "&&" not in expr:
+        return False
+
+    for part in _expression_parts(expr):
+        cleaned = part.strip().strip("()")
+        if not _is_simple_github_ref(cleaned):
+            continue
+        for context in untrusted_contexts:
+            if _matches_untrusted_context(cleaned, context):
+                return True
     return False
 
 

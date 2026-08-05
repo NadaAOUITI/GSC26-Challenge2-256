@@ -28,12 +28,12 @@ External Data → data_loader → resolver → detector+taint → patcher → pr
 | Patch generation (env-wrap + unified diff) | Done |
 | Predict / submission CSV pipeline | Done |
 | Unit + integration tests | 28 passing |
-| Train metrics | TP=22, FP=0, FN=7 (~76% recall) |
-| Kaggle validation workflows | Pending (Kaggle data compression) |
+| Train metrics | TP=29, FP=0, FN=0 (~100% recall) |
+| Kaggle validation workflows | Pull from GitHub when `validation/` is published |
 
 **Pipeline:** `scan` → `eval` → `patch` → `predict`
 
-**Kaggle:** Upload `output/submission_train.csv` for Phase I checkpoint; re-run `predict --split validation` once validation workflows are available.
+**Kaggle:** Download `sample_submission.csv` from the Data tab. Once `dataset/validation/workflows/` exists, run `predict --split validation` and upload `output/submission.csv` (75 rows). Do not upload the 150-row train file.
 
 ## Data setup
 
@@ -43,11 +43,14 @@ External Data → data_loader → resolver → detector+taint → patcher → pr
    git clone https://github.com/XinyuZhangXvX/detect-and-fix-vulnerabilities-in-github-actions.git dataset
    ```
 
-2. Download from [Kaggle Data tab](https://www.kaggle.com/competitions/detect-and-fix-vulnerabilities-in-github-actions/data) into `data/`:
-   - `train.csv` — sample IDs and ground-truth labels
+2. Download from [Kaggle Data tab](https://www.kaggle.com/competitions/detect-and-fix-vulnerabilities-in-github-actions/data):
+   - `train.csv` — sample IDs and ground-truth labels (training only)
    - `untrusted_data.csv` — list of untrusted GitHub context expressions
+   - `sample_submission.csv` — **75-row template for Kaggle uploads**
 
-3. When available, place validation workflow YAML files in `dataset/validation/workflows/`.
+3. Clone/pull the [competition GitHub repo](https://github.com/XinyuZhangXvX/detect-and-fix-vulnerabilities-in-github-actions) into `dataset/` (includes workflow YAML + actions). When organizers publish it, validation lives under `dataset/validation/workflows/`.
+
+**Note:** The Kaggle zip (~12 KB) contains only the CSV metadata files above — not the workflow YAML. Do **not** upload `submission_train.csv` (150 rows) to Kaggle; use validation predict (75 rows).
 
 ## Project layout
 
